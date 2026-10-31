@@ -297,7 +297,7 @@ function makeTrack(){
   events.forEach(e=>{const c=clips[e.k],o=Math.round(e.t*SR);
     for(let i=0;i<c.length&&o+i<n;i++){const v=pcm[o+i]+c[i]*32000;pcm[o+i]=v>32767?32767:v<-32768?-32768:v}});
   if(trackUrl)URL.revokeObjectURL(trackUrl);trackUrl=URL.createObjectURL(wavFromInt16(pcm));
-  if(!player){player=new Audio();player.preload="auto";player.addEventListener("ended",()=>{if(!finished)finish()});
+  if(!player){player=new Audio();player.preload="auto";player.addEventListener("ended",()=>{if(!finished)finish()});player.addEventListener("timeupdate",()=>{if(document.hidden)tick()});
     player.addEventListener("pause",()=>{if(useTrack&&running&&!finished&&!player.ended){running=false;$("bPlay").textContent="Continuar";tick()}});
     player.addEventListener("play",()=>{if(useTrack&&!running&&!finished){running=true;$("bPlay").textContent="Pausar"}})}
   player.src=trackUrl;
@@ -306,9 +306,52 @@ function getT(){if(useTrack)return player.currentTime;return running?acc+(perfor
 function setT(x){lastT=x;if(useTrack){try{player.currentTime=x}catch(e){}}else{acc=x;t0=performance.now()}}
 function liveSound(k){try{if(!live)live=new (window.AudioContext||window.webkitAudioContext)();if(live.state==="suspended")live.resume();
   const c=clips[k],b=live.createBuffer(1,c.length,SR);b.getChannelData(0).set(c);const s=live.createBufferSource();s.buffer=b;s.connect(live.destination);s.start()}catch(e){}}
-function media(){try{if(!("mediaSession" in navigator))return;const P=phases[pi];
-  navigator.mediaSession.metadata=new MediaMetadata({title:P?({prep:"Preparar",work:"Round "+P.r+" de "+cfg.rounds,rest:"Descanso"}[P.type]):"Timer BJJ",artist:"Timer BJJ · Team Paunksnis",album:"Picos"});
-  navigator.mediaSession.setActionHandler("play",()=>togglePlay(true));navigator.mediaSession.setActionHandler("pause",()=>togglePlay(false));}catch(e){}}
+/* ---------- TELA BLOQUEADA (Media Session) ----------
+   O iOS/Android mostram o player padrão; aqui ele vira painel do treino:
+   capa gerada com fase/round/cor, título com o tempo restante, linha de baixo com o próximo pico,
+   barra de progresso = fase atual, botões ⏮ ⏭ = reiniciar/pular fase. */
+const artCache={};let lastTitle="",lastArtKey="",lastPosKey="",handlersSet=false;
+function artwork(key,bg,fg,big,mid,small){
+  if(artCache[key])return artCache[key];
+  const c=document.createElement("canvas");c.width=c.height=512;const g=c.getContext("2d");
+  g.fillStyle=bg;g.fillRect(0,0,512,512);
+  const lg=document.querySelector("img.logo");if(lg&&lg.complete){try{g.drawImage(lg,196,24,120,120)}catch(e){}}
+  g.fillStyle=fg;g.textAlign="center";g.textBaseline="middle";
+  let fs=150;do{g.font="700 "+fs+"px Oswald, Impact, sans-serif";fs-=6}while(g.measureText(big).width>470&&fs>40);g.fillText(big,256,262);
+  let f2=52;do{g.font="600 "+f2+"px Oswald, Impact, sans-serif";f2-=4}while(g.measureText(mid).width>470&&f2>20);g.fillText(mid,256,375);
+  g.globalAlpha=.8;g.font="500 30px Inter, Arial, sans-serif";g.fillText(small,256,440);g.globalAlpha=1;
+  return artCache[key]=c.toDataURL("image/png");
+}
+function mediaHandlers(){if(handlersSet||!("mediaSession" in navigator))return;handlersSet=true;
+  const h=(a,f)=>{try{navigator.mediaSession.setActionHandler(a,f)}catch(e){}};
+  h("play",()=>togglePlay(true));h("pause",()=>togglePlay(false));
+  h("nexttrack",()=>$("bSkip").click());
+  h("previoustrack",()=>{if(!finished&&phases[pi]){setT(phases[pi].start+0.01);tick()}});
+  h("seekbackward",null);h("seekforward",null);h("seekto",null);
+}
+function media(st){try{
+  if(!("mediaSession" in navigator)||!st)return;mediaHandlers();
+  const {P,elapsed,rem,cls}=st;const R=`Round ${Math.min(P.r,cfg.rounds)}/${cfg.rounds}`;let title,artist,art;
+  if(cls==="peak"){const left=Math.ceil(P.peaks.find(s=>elapsed>=s&&elapsed<s+cfg.pdur)+cfg.pdur-elapsed);
+    title=`⚡ PICO! ${left}s`;artist=`${R} · luta ${fmt(rem)}`;art=["peak",'#ffffff','#0b0b0c',"PICO!",R,"explosão máxima"]}
+  else if(cls==="warn"){const nx=P.peaks.find(s=>elapsed<s);
+    title=`🟠 PICO EM ${Math.ceil(nx-elapsed)}`;artist=`${R} · luta ${fmt(rem)}`;art=["warn",'#c2410c','#ffffff',"PREPARA",R,"pico chegando"]}
+  else if(cls==="work"){const nx=P.peaks.find(s=>elapsed<s);
+    title=`🔴 LUTA ${fmt(rem)}`;artist=nx!==undefined?`${R} · próximo pico em ${fmt(nx-elapsed)}`:`${R} · ritmo até o fim`;
+    art=["work"+P.r,'#a10d22','#ffffff',"LUTA",R,P.peaks.length?P.peaks.length+" picos neste round":"sem picos"]}
+  else if(cls==="rest"){title=`🟢 DESCANSO ${fmt(rem)}`;artist=`Próximo: round ${P.r} de ${cfg.rounds}`;art=["rest"+P.r,'#0f2a1c','#ffffff',"DESCANSO",`Próximo: round ${P.r}`,"respira e hidrata"]}
+  else{title=`⏱ PREPARAR ${fmt(rem)}`;artist=`${cfg.rounds} rounds de ${fmt(cfg.work)}`;art=["prep",'#3a2a06','#ffffff',"PREPARAR","Round 1/"+cfg.rounds,"posiciona e respira"]}
+  if(!running){title="⏸ PAUSADO · "+title.replace(/^\S+\s/,"")}
+  const artKey=art[0]+(running?"":"p");
+  if(title!==lastTitle||artKey!==lastArtKey){lastTitle=title;lastArtKey=artKey;
+    navigator.mediaSession.metadata=new MediaMetadata({title,artist,album:"Timer BJJ · Team Paunksnis",
+      artwork:[{src:artwork(...art),sizes:"512x512",type:"image/png"}]})}
+  // barra do bloqueio = fase atual (o próprio sistema avança a barra, mesmo sem a página rodando)
+  const posKey=pi+"|"+running;
+  if(navigator.mediaSession.setPositionState&&(posKey!==lastPosKey||Math.floor(elapsed)%5===0)){lastPosKey=posKey;
+    navigator.mediaSession.setPositionState({duration:P.dur,position:Math.max(0,Math.min(elapsed,P.dur-0.01)),playbackRate:running?1:0.0001})}
+  navigator.mediaSession.playbackState=running?"playing":"paused";
+}catch(e){}}
 async function wake(){try{lock=await navigator.wakeLock.request("screen")}catch(e){}}
 function startSession(){
   build();pi=-1;finished=false;lastT=0;
@@ -327,14 +370,14 @@ function togglePlay(force){
 }
 function finish(){finished=true;running=false;clearInterval(timer);const R=$("run");R.className="done";
   $("phase").textContent="Fim do treino";$("clock").textContent="✓";$("info").textContent=cfg.rounds+" rounds concluídos. Bom treino!";
-  $("rnd").textContent="";$("bPlay").textContent="De novo";$("bar").innerHTML="";$("lgL").textContent="";$("lgR").textContent="";try{lock&&lock.release()}catch(e){}}
+  $("rnd").textContent="";$("bPlay").textContent="De novo";try{navigator.mediaSession.metadata=new MediaMetadata({title:"✅ Treino concluído",artist:cfg.rounds+" rounds · Timer BJJ",album:"Team Paunksnis",artwork:[{src:artwork("done","#0b0b0c","#ffffff","FIM","Bom treino!","Team Paunksnis"),sizes:"512x512",type:"image/png"}]});navigator.mediaSession.playbackState="none"}catch(e){}$("bar").innerHTML="";$("lgL").textContent="";$("lgR").textContent="";try{lock&&lock.release()}catch(e){}}
 function tick(){
   if(finished)return;
   const t=getT();
   if(running){for(const e of events){if(e.t>lastT&&e.t<=t&&t-e.t<1){vib(VIB[e.k]);if(!useTrack)liveSound(e.k)}}lastT=t}
   if(t>=sessionEnd){finish();return}
   let i=phases.length-1;while(i>0&&phases[i].start>t)i--;
-  if(i!==pi){pi=i;drawBar();media()}
+  if(i!==pi){pi=i;drawBar()}
   const P=phases[pi];elapsed=t-P.start;const rem=P.dur-elapsed;
   const R=$("run");let cls=P.type,phase={prep:"Preparar",work:"Luta",rest:"Descanso"}[P.type],info="";
   if(P.type==="work"){
@@ -355,6 +398,7 @@ function tick(){
   $("clock").textContent=cls==="peak"?Math.ceil(P.peaks.find(s=>elapsed>=s&&elapsed<s+cfg.pdur)+cfg.pdur-elapsed):fmt(rem);
   $("info").textContent=info;
   $("rnd").textContent=`ROUND ${Math.min(P.r,cfg.rounds)}/${cfg.rounds}`;
+  media({P,elapsed,rem,cls});
 }
 function drawBar(){const P=phases[pi],b=$("bar");b.innerHTML="";
   if(P&&P.type==="work"){b.style.visibility="visible";
